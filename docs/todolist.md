@@ -46,3 +46,19 @@
   - 当检测到 MemTable 的大小超过设定阈值（如 4MB），发生替换。旧表送往后台通道进行 `SsTableBuilder::build`。
 - [ ] **优雅关闭 (Graceful Shutdown)**：
   - 为 `DbKernel` 实现 `Drop`，向后台下发 `Shutdown` 毒丸信号并 `join`，确保停止前最后一部分滞留状态被完全落盘。
+
+```text
+lsmkv/
+├── Cargo.toml            # 项目配置与依赖 (serde, bincode, memmap2, thiserror)
+├── docs/                 # 您的文档目录
+│   ├── lsm_kv_architecture.md
+│   └── todolist.md
+└── src/
+    ├── lib.rs            # 根模块，负责 pub mod 导出各个子模块，对外暴露 API
+    ├── error.rs          # 定义统一的 DbError 枚举和 Result<T> 别名
+    ├── model.rs          # 纯数据定义：Key, Value, RecordType, LogRecord
+    ├── wal.rs            # 预写日志的 IO 实现：WalWriter (追加写) 和 WalReader (故障回放)
+    ├── memtable.rs       # 内存表封装：包装 BTreeMap，提供 put/get 并维护 approx_size
+    ├── sstable.rs        # 磁盘表操作：SsTableBuilder (序列化落盘) 和 SsTableReader (mmap 零拷贝查询)
+    └── db.rs             # 核心枢纽：定义 DbKernel，实现 put/get/delete/write，管理 mpsc 通道与后台 Flush 线程
+```

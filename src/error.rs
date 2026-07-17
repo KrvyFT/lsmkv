@@ -5,7 +5,7 @@ pub enum DbError {
     #[error("IO Error: {0}")]
     IO(#[from] std::io::Error),
     #[error("Serialize Error: {0}")]
-    Serialize(#[from] serde_json::Error),
+    Serialize(#[from] bincode::Error),
     #[error("Data corruption: {0}")]
     Corruption(String),
 }
