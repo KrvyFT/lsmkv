@@ -2,32 +2,40 @@ use std::collections::BTreeMap;
 
 use crate::{
     error::DbError,
-    model::{Key, RecordType, Value},
+    model::{GetResult, Key, Value},
 };
 
+pub static MEM_TABLE_MAX_SIZE: usize = 4 * 1024 * 1024;
+
 pub struct MemTable {
+    pub id: u64,
     map: BTreeMap<Key, Option<Value>>,
     pub approx_size: usize,
 }
 
 impl MemTable {
-    pub fn new() -> Self {
+    pub fn new(id: u64) -> Self {
         Self {
+            id,
             map: BTreeMap::new(),
             approx_size: 0,
         }
     }
 
-    pub fn put(&mut self, key: Key, value: Value) {
+    pub fn put(&mut self, key: Key, value: Option<Value>) {
         let key_len = key.len();
-        self.approx_size += key_len + value.len();
-        if let Some(old_value) = self.map.insert(key, Some(value)) {
+        self.approx_size += key_len + value.as_ref().map_or(0, |v| v.len());
+        if let Some(old_value) = self.map.insert(key, value) {
             self.approx_size -= key_len + old_value.map_or(0, |v| v.len());
         }
     }
 
-    pub fn get(&self, key: &Key) -> Option<&Option<Value>> {
-        self.map.get(key)
+    pub fn get(&self, key: &Key) -> GetResult<&Value> {
+        match self.map.get(key) {
+            Some(Some(v)) => GetResult::Found(v),
+            Some(None) => GetResult::Deleted,
+            None => GetResult::NotFound,
+        }
     }
 
     pub fn delete(&mut self, key: &Key) -> Result<(), DbError> {

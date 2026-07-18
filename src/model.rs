@@ -15,3 +15,10 @@ pub struct LogRecord {
     pub key: Key,
     pub value: Option<Value>,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetResult<T> {
+    Found(T),
+    Deleted,
+    NotFound,
+}

@@ -1,5 +1,6 @@
 use crate::sstable::sstable_builder::SSTableBuilder;
 
+mod db_kernel;
 mod error;
 mod memtable;
 mod model;
@@ -7,7 +8,7 @@ mod sstable;
 mod wal;
 
 fn main() {
-    let mut builder = SSTableBuilder::new("1.sst");
+    let builder = SSTableBuilder::new("1.sst");
     builder
         .build(
             vec![

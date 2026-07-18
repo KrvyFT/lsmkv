@@ -8,6 +8,8 @@ pub enum DbError {
     Serialize(#[from] bincode::Error),
     #[error("Data corruption: {0}")]
     Corruption(String),
+    #[error("Key not found")]
+    NotFound,
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
