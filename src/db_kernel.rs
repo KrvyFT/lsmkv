@@ -1,7 +1,12 @@
-use std::sync::{Arc, mpsc};
+use std::{
+    fs::create_dir_all,
+    path::Path,
+    sync::{Arc, mpsc},
+};
 
 use crate::{
     error::{DbError, Result},
+    flush::FlushTask,
     memtable::{MEM_TABLE_MAX_SIZE, MemTable},
     model::{GetResult, Key, LogRecord, RecordType, Value},
     wal::WalWriter,
@@ -16,11 +21,6 @@ pub struct WriteBatch {
     pub ops: Vec<WriteOP>,
 }
 
-pub enum FlushTask {
-    Task(Arc<MemTable>),
-    Shutdown,
-}
-
 pub struct DbKernel {
     memtable: MemTable,
     imm_memtables: Vec<Arc<MemTable>>,
@@ -31,13 +31,65 @@ pub struct DbKernel {
 }
 
 impl DbKernel {
-    pub fn new(wal_path: &str, flush_tx: mpsc::Sender<FlushTask>, dir: &str) -> Result<Self> {
+    pub fn new(flush_tx: mpsc::Sender<FlushTask>, dir: &str) -> Result<Self> {
+        let dir_path = Path::new(dir);
+        if !dir_path.exists() {
+            create_dir_all(dir_path).unwrap();
+        }
+
+        let mut wal_files = Vec::new();
+        for entry in dir_path.read_dir().unwrap() {
+            let entry = entry.unwrap();
+            let file_name = entry.file_name().into_string().unwrap();
+
+            if file_name.starts_with("log_") && file_name.ends_with(".log") {
+                let id_str = &file_name[4..file_name.len() - 4];
+                if let Ok(id) = id_str.parse::<u64>() {
+                    wal_files.push((id, entry.path()));
+                }
+            }
+        }
+
+        wal_files.sort_by_key(|k| k.0);
+
+        let mut imm_memtables = Vec::new();
+        let mut active_memtable = None;
+        let mut next_file_id = 0;
+
+        if wal_files.is_empty() {
+            active_memtable = Some(MemTable::new(0));
+        } else {
+            let last_idx = wal_files.len() - 1;
+            for (i, (id, path)) in wal_files.iter().enumerate() {
+                let records = WalWriter::read_all_records(path)?;
+                let mut memtable = MemTable::new(*id);
+
+                for rec in records {
+                    match rec.r_type {
+                        RecordType::Put => memtable.put(rec.key, rec.value),
+                        RecordType::Delete => memtable.delete(&rec.key)?,
+                    }
+                }
+
+                if i == last_idx {
+                    active_memtable = Some(memtable);
+                    next_file_id = *id;
+                } else {
+                    let imm = Arc::new(memtable);
+                    imm_memtables.push(imm.clone());
+                    flush_tx.send(FlushTask::Task(imm)).unwrap();
+                }
+            }
+        }
+
+        let wal = WalWriter::new(dir, next_file_id)?;
+
         Ok(Self {
-            memtable: MemTable::new(0),
-            imm_memtables: Vec::new(),
-            wal: WalWriter::new(wal_path, 0)?,
+            memtable: active_memtable.unwrap(),
+            imm_memtables,
+            wal,
             flush_tx,
-            next_file_id: 0,
+            next_file_id,
             wal_dir: dir.to_string(),
         })
     }

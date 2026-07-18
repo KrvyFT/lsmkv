@@ -2,6 +2,7 @@ use crate::sstable::sstable_builder::SSTableBuilder;
 
 mod db_kernel;
 mod error;
+mod flush;
 mod memtable;
 mod model;
 mod sstable;

@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufWriter, ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -53,6 +53,34 @@ impl WalWriter {
         self.writer = BufWriter::new(file);
 
         Ok(())
+    }
+
+    pub fn read_all_records(path: &Path) -> Result<Vec<LogRecord>, DbError> {
+        let mut file = File::open(path).map_err(|e| DbError::Corruption(e.to_string()))?;
+        let mut records = Vec::new();
+        loop {
+            let mut len_buf = [0u8; 4];
+            if let Err(e) = file.read_exact(&mut len_buf) {
+                if e.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                eprintln!("Warning: WAL file may be truncated: {}", e);
+                break;
+            }
+
+            let len = u32::from_le_bytes(len_buf);
+            let mut encode = vec![0u8; len as usize];
+
+            if let Err(e) = file.read_exact(&mut encode) {
+                eprintln!("Warning: WAL file may be truncated: {}", e);
+                break;
+            }
+
+            let record: LogRecord =
+                bincode::deserialize(&encode).map_err(|e| DbError::Corruption(e.to_string()))?;
+            records.push(record);
+        }
+        Ok(records)
     }
 
     pub fn append(&mut self, record: &LogRecord) -> Result<(), DbError> {

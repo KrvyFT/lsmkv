@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lake"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22,6 +26,7 @@ name = "lsmkv"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "lake",
  "memmap2",
  "serde",
  "thiserror",
