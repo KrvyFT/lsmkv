@@ -13,5 +13,5 @@ pub enum RecordType {
 pub struct LogRecord {
     pub r_type: RecordType,
     pub key: Key,
-    pub value: Value,
+    pub value: Option<Value>,
 }

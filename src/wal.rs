@@ -22,7 +22,6 @@ impl WalWriter {
         let len = encode.len() as u32;
         self.writer.write_all(&len.to_le_bytes())?;
         self.writer.write_all(&encode)?;
-        self.writer.flush()?;
 
         Ok(())
     }

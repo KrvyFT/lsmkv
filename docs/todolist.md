@@ -4,24 +4,24 @@
 
 ## 阶段一：项目骨架与序列化机制
 
-- [ ] **项目初始化**：执行 `cargo init`，并在 `Cargo.toml` 中引入 `thiserror`, `serde`, `bincode`, `memmap2`。
-- [ ] **基础定义与错误处理**：
+- [x] **项目初始化**：执行 `cargo init`，并在 `Cargo.toml` 中引入 `thiserror`, `serde`, `bincode`, `memmap2`。
+- [x] **基础定义与错误处理**：
   - 在 `src/error.rs` 定义统一的 `DbError` 和 `Result<T>` 枚举。
   - 在 `src/model.rs` 中使用 `bincode` 和 `serde` 定义 `LogRecord`（涵盖 Put 和 Delete）。
 
 ## 阶段二：WAL (预写日志) 的读写
 
-- [ ] **WAL 写入机制 (`WalWriter`)**：
+- [x] **WAL 写入机制 (`WalWriter`)**：
   - 创建 `src/wal.rs`。
   - 实现基于 `[长度 (4字节)] + [bincode payload]` 的文件流式追加格式。
   - 务必暴露 `sync` 方法来调用 `File::sync_data`。
-- [ ] **WAL 恢复机制 (`WalReader`)**：
+- [] **WAL 恢复机制 (`WalReader`)**：
   - 实现重启时的数据回放读取。
   - 处理尾部记录突然由于断电截断导致的 `UnexpectedEof`，吞掉错误并返回成功解析的记录。
 
 ## 阶段三：内存表与前台读写分离
 
-- [ ] **构建 `MemTable`**：
+- [x] **构建 `MemTable`**：
   - 在 `src/memtable.rs` 中包装 `BTreeMap<Key, Value>`。
   - 实现 `put`, `get`, `delete`，同时维护当前内存字节数的 `approx_size` 评估计数。
 - [ ] **组合 `DbKernel`**：
@@ -30,7 +30,7 @@
 
 ## 阶段四：SSTable 磁盘序列化与读取
 
-- [ ] **SSTable 构建 (`SsTableBuilder`)**：
+- [x] **SSTable 构建 (`SsTableBuilder`)**：
   - 在 `src/sstable.rs` 中实现 `build`，遍历冻结的内存表 `Iter`。
   - 按顺序序列化 K-V（Data Block）并同时记录该条目的文件起始 Offset 至索引集合。
   - 结束时在文件尾部追写 Index Block（存放 BTreeMap 的序列化）与固定 16 字节的 Footer（Index Offset + 魔法魔数）。
