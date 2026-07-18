@@ -56,19 +56,6 @@ impl MemTable {
         Ok(())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn clear(&mut self) {
-        self.map.clear();
-        self.approx_size = 0;
-    }
-
     /// Returns an iterator over the key-value pairs in the MemTable.
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Option<Value>)> {
         self.map.iter()

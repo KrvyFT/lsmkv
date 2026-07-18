@@ -102,6 +102,9 @@ impl WalWriter {
 
     /// Flushes the internal buffer and forces an fsync to ensure durability.
     pub fn sync(&mut self) -> Result<(), DbError> {
+        // 必须先调用 flush()，将 BufWriter 在内存里缓冲的字节推入操作系统的内核态
+        self.writer.flush()?;
+        // 然后再调用底层 File 的 sync_data()，让操作系统把内核态的数据刷入物理硬盘
         self.writer.get_mut().sync_data()?;
 
         Ok(())

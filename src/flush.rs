@@ -16,8 +16,6 @@ pub struct FlushResult {
 pub enum FlushTask {
     /// Instructs the flusher to write the given Immutable MemTable to disk.
     Task(Arc<MemTable>),
-    /// Signals the background flusher to shutdown.
-    Shutdown,
 }
 
 use lake::thread_pool::ThreadPool;
@@ -74,7 +72,6 @@ impl Flusher {
                             }));
                         });
                     }
-                    FlushTask::Shutdown => break,
                 }
             }
         })

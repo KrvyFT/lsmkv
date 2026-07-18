@@ -17,15 +17,12 @@ impl Worker {
                 let result = revice.lock().unwrap().recv();
                 match result {
                     Ok(Message::NewJob(job)) => {
-                        println!("Worker {id} got a job; executing.");
                         job();
                     }
                     Ok(Message::Terminate) => {
-                        println!("Worker {id} received Terminate; shutting down.");
                         break;
                     }
                     Err(_) => {
-                        println!("Worker {id} channel disconnected; shutting down.");
                         break;
                     }
                 }
