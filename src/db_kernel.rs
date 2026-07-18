@@ -18,10 +18,14 @@ pub enum WriteOP {
     Delete(Key),
 }
 
+/// A batch of write operations to be executed atomically.
 pub struct WriteBatch {
+    /// The operations in the batch
     pub ops: Vec<WriteOP>,
 }
 
+/// The core kernel of the LSM-Tree database.
+/// Coordinates MemTable, WAL, Immutable MemTables, and SSTables.
 pub struct DbKernel {
     memtable: MemTable,
     imm_memtables: Vec<Arc<MemTable>>,
@@ -34,6 +38,7 @@ pub struct DbKernel {
 }
 
 impl DbKernel {
+    /// Creates a new `DbKernel` instance, recovering from the WAL log if it exists.
     pub fn new(
         flush_tx: mpsc::Sender<FlushTask>,
         flush_rx: mpsc::Receiver<Result<FlushResult>>,
@@ -122,9 +127,10 @@ impl DbKernel {
         }
     }
 
+    /// Executes a batch of write operations atomically.
     pub fn write(&mut self, batch: &WriteBatch) -> Result<()> {
         self.try_sync_flush_results();
-        
+
         for op in &batch.ops {
             let record = match op {
                 WriteOP::Put(k, v) => LogRecord {
@@ -163,18 +169,22 @@ impl DbKernel {
         Ok(())
     }
 
+    /// Inserts a key-value pair into the database.
     pub fn put(&mut self, k: Key, v: Value) -> Result<()> {
         self.write(&WriteBatch {
             ops: vec![WriteOP::Put(k, v)],
         })
     }
 
+    /// Deletes a key from the database using a Tombstone.
     pub fn delete(&mut self, k: Key) -> Result<()> {
         self.write(&WriteBatch {
             ops: vec![WriteOP::Delete(k)],
         })
     }
 
+    /// Retrieves a value by its key.
+    /// Searches in MemTable -> Immutable MemTables -> SSTables in order.
     pub fn get(&self, k: &Key) -> Result<Value> {
         match self.memtable.get(k) {
             GetResult::Found(v) => return Ok(v.clone()),

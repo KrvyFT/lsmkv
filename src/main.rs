@@ -17,11 +17,13 @@ fn main() {
     let dir = "./data_test";
     let _ = std::fs::remove_dir_all(dir); // 确保环境干净
 
+    // table adn path
     let (flush_tx, task_rx) = mpsc::channel();
+    // task adn new sstable
     let (result_tx, flush_rx) = mpsc::channel();
 
     // 启动后台 Flusher，池大小设置为 4
-    let flusher = Flusher::new(task_rx, result_tx, dir, 4);
+    let flusher = Flusher::new(result_tx, task_rx, dir, 4);
     flusher.spawn();
 
     // 启动 DbKernel

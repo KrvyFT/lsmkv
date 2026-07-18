@@ -4,18 +4,26 @@ use std::thread;
 
 use crate::{error::Result, memtable::MemTable, sstable::sstable_builder::SSTableBuilder};
 
+/// Result of a successful background flush operation.
 pub struct FlushResult {
+    /// ID of the MemTable that was flushed.
     pub memtable_id: u64,
+    /// Absolute or relative path to the generated SSTable file.
     pub sstable_path: String,
 }
 
+/// A task dispatched to the background flusher.
 pub enum FlushTask {
+    /// Instructs the flusher to write the given Immutable MemTable to disk.
     Task(Arc<MemTable>),
+    /// Signals the background flusher to shutdown.
     Shutdown,
 }
 
 use lake::thread_pool::ThreadPool;
 
+/// Background task orchestrator for flushing Immutable MemTables to disk.
+/// Uses a thread pool (`lake::ThreadPool`) to execute I/O concurrently.
 pub struct Flusher {
     task_rx: mpsc::Receiver<FlushTask>,
     result_tx: mpsc::Sender<Result<FlushResult>>,
@@ -24,9 +32,10 @@ pub struct Flusher {
 }
 
 impl Flusher {
+    /// Creates a new `Flusher` instance with a dedicated thread pool.
     pub fn new(
-        task_rx: mpsc::Receiver<FlushTask>,
         result_tx: mpsc::Sender<Result<FlushResult>>,
+        task_rx: mpsc::Receiver<FlushTask>,
         sst_dir: impl Into<PathBuf>,
         pool_size: usize,
     ) -> Self {
@@ -38,6 +47,8 @@ impl Flusher {
         }
     }
 
+    /// Spawns the main dispatch loop in a background thread.
+    /// Listens for `FlushTask`s and delegates them to the `lake` thread pool.
     pub fn spawn(self) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while let Ok(task) = self.task_rx.recv() {

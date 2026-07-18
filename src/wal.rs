@@ -6,12 +6,15 @@ use std::{
 
 use crate::{error::DbError, model::LogRecord};
 
+/// Write-Ahead Log (WAL) writer.
+/// Ensures durability by appending all operations to a sequential log file before applying them to the MemTable.
 pub struct WalWriter {
     writer: BufWriter<File>,
     dir: PathBuf,
 }
 
 impl WalWriter {
+    /// Creates a new `WalWriter` opening a `.log` file in the specified directory.
     pub fn new(dir: impl AsRef<Path>, initial_id: u64) -> Result<Self, DbError> {
         let dir_path = dir.as_ref().to_path_buf();
 
@@ -33,6 +36,8 @@ impl WalWriter {
         })
     }
 
+    /// Rotates the WAL to a new file with the specified `next_id`.
+    /// Flushes and syncs the old file before closing it.
     pub fn rotate(&mut self, next_id: u64) -> Result<(), DbError> {
         self.writer
             .flush()
@@ -55,6 +60,8 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Reads and deserializes all records from a WAL file.
+    /// Used for crash recovery during database startup.
     pub fn read_all_records(path: &Path) -> Result<Vec<LogRecord>, DbError> {
         let mut file = File::open(path).map_err(|e| DbError::Corruption(e.to_string()))?;
         let mut records = Vec::new();
@@ -83,6 +90,7 @@ impl WalWriter {
         Ok(records)
     }
 
+    /// Appends a new `LogRecord` to the WAL in memory buffer.
     pub fn append(&mut self, record: &LogRecord) -> Result<(), DbError> {
         let encode: Vec<u8> = bincode::serialize(record)?;
         let len = encode.len() as u32;
@@ -92,6 +100,7 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Flushes the internal buffer and forces an fsync to ensure durability.
     pub fn sync(&mut self) -> Result<(), DbError> {
         self.writer.get_mut().sync_data()?;
 

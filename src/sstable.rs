@@ -10,6 +10,8 @@ pub mod sstable_builder {
         model::{Key, LogRecord, RecordType, Value},
     };
 
+    /// Builder for constructing Sorted String Tables (SSTables).
+    /// Used by the background flusher to write MemTables to disk.
     pub struct SSTableBuilder {
         writer: BufWriter<File>,
         index: BTreeMap<Key, u64>,
@@ -17,6 +19,7 @@ pub mod sstable_builder {
     }
 
     impl SSTableBuilder {
+        /// Creates a new `SSTableBuilder` targeting the specified file path.
         pub fn new(path: &str) -> Self {
             let file = OpenOptions::new()
                 .create(true)
@@ -31,6 +34,8 @@ pub mod sstable_builder {
             }
         }
 
+        /// Builds the SSTable by writing all key-value pairs from the given iterator.
+        /// Flushes the index and footer at the end of the file.
         pub fn build(mut self, mem_iter: impl Iterator<Item = (Key, Option<Value>)>) -> Result<()> {
             for (k, v) in mem_iter {
                 let record = LogRecord {
@@ -76,12 +81,15 @@ pub mod sstable {
         model::{GetResult, Key, LogRecord, RecordType, Value},
     };
 
+    /// A Sorted String Table (SSTable) residing on disk.
+    /// Uses memory mapping (mmap) for zero-copy, efficient reads.
     pub struct SSTable {
         mmap: Arc<Mmap>,
         index: BTreeMap<Key, u64>,
     }
 
     impl SSTable {
+        /// Opens an existing SSTable from disk, verifying its magic number and loading its index.
         pub fn open(path: &str) -> Result<Self> {
             let file = File::open(path)?;
             let mmap = unsafe { Mmap::map(&file)? };
@@ -108,6 +116,8 @@ pub mod sstable {
             })
         }
 
+        /// Retrieves a value by key directly from the mmap-backed file.
+        /// Uses the loaded BTreeMap index to find the exact byte offset.
         pub fn get(&self, key: &Key) -> GetResult<Value> {
             if let Some(&offset) = self.index.get(key) {
                 let mut current = offset as usize;
