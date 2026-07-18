@@ -38,40 +38,32 @@ impl Flusher {
         }
     }
 
-    /// 启动后台分发线程，使用 lake 线程池进行实际刷盘
     pub fn spawn(self) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while let Ok(task) = self.task_rx.recv() {
                 match task {
-                    FlushTask::Task(imm) => {
-                        let id = imm.id;
+                    FlushTask::Task(mem_table) => {
+                        let id = mem_table.id;
                         let sst_name = format!("sst_{:06}.sst", id);
                         let sst_path = self.sst_dir.join(&sst_name);
                         let result_tx = self.result_tx.clone();
 
                         self.pool.execute(move || {
-                            // 初始化 SSTable 构建器
                             let builder = SSTableBuilder::new(sst_path.to_str().unwrap());
 
-                            // 将 MemTable 的数据克隆出来传入构建器 (底层写入硬盘)
-                            let iter = imm.iter().map(|(k, v)| (k.clone(), v.clone()));
-
-                            // 执行落盘
+                            let iter = mem_table.iter().map(|(k, v)| (k.clone(), v.clone()));
                             if let Err(e) = builder.build(iter) {
                                 let _ = result_tx.send(Err(e));
                                 return;
                             }
 
-                            // 将成功落盘的消息发回主线程
                             let _ = result_tx.send(Ok(FlushResult {
                                 memtable_id: id,
                                 sstable_path: sst_path.to_string_lossy().into_owned(),
                             }));
                         });
                     }
-                    FlushTask::Shutdown => {
-                        break;
-                    }
+                    FlushTask::Shutdown => break,
                 }
             }
         })

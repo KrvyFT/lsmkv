@@ -6,9 +6,10 @@ use std::{
 
 use crate::{
     error::{DbError, Result},
-    flush::FlushTask,
+    flush::{FlushResult, FlushTask},
     memtable::{MEM_TABLE_MAX_SIZE, MemTable},
     model::{GetResult, Key, LogRecord, RecordType, Value},
+    sstable::sstable::SSTable,
     wal::WalWriter,
 };
 
@@ -25,13 +26,19 @@ pub struct DbKernel {
     memtable: MemTable,
     imm_memtables: Vec<Arc<MemTable>>,
     wal: WalWriter,
-    flush_tx: mpsc::Sender<FlushTask>,
     next_file_id: u64,
     wal_dir: String,
+    flush_tx: mpsc::Sender<FlushTask>,
+    flush_rx: mpsc::Receiver<Result<FlushResult>>,
+    sstables: Vec<SSTable>,
 }
 
 impl DbKernel {
-    pub fn new(flush_tx: mpsc::Sender<FlushTask>, dir: &str) -> Result<Self> {
+    pub fn new(
+        flush_tx: mpsc::Sender<FlushTask>,
+        flush_rx: mpsc::Receiver<Result<FlushResult>>,
+        dir: &str,
+    ) -> Result<Self> {
         let dir_path = Path::new(dir);
         if !dir_path.exists() {
             create_dir_all(dir_path).unwrap();
@@ -91,10 +98,33 @@ impl DbKernel {
             flush_tx,
             next_file_id,
             wal_dir: dir.to_string(),
+            flush_rx,
+            sstables: Vec::new(),
         })
     }
 
+    fn try_sync_flush_results(&mut self) {
+        // 使用 try_recv() 绝不阻塞主线程，一直收直到信箱空了（Err(Empty)）为止
+        while let Ok(Ok(result)) = self.flush_rx.try_recv() {
+            // 1. 加载刚刷盘写好的 SSTable
+            if let Ok(sstable) = SSTable::open(&result.sstable_path) {
+                self.sstables.push(sstable);
+            }
+
+            // 2. 将对应的旧 MemTable 从只读队列里剔除
+            self.imm_memtables
+                .retain(|imm| imm.id != result.memtable_id);
+
+            // 3. 垃圾回收：删除掉这部分数据对应的原始 WAL 文件 (如 log_000000.log)
+            let wal_path = std::path::Path::new(&self.wal_dir)
+                .join(format!("log_{:06}.log", result.memtable_id));
+            let _ = std::fs::remove_file(wal_path);
+        }
+    }
+
     pub fn write(&mut self, batch: &WriteBatch) -> Result<()> {
+        self.try_sync_flush_results();
+        
         for op in &batch.ops {
             let record = match op {
                 WriteOP::Put(k, v) => LogRecord {
@@ -160,6 +190,14 @@ impl DbKernel {
             }
         }
 
-        Err(DbError::NotFound) // TODO: fallback to SSTables
+        for sst in self.sstables.iter().rev() {
+            match sst.get(k) {
+                GetResult::Found(v) => return Ok(v),
+                GetResult::Deleted => return Err(DbError::NotFound),
+                GetResult::NotFound => continue,
+            }
+        }
+
+        Err(DbError::NotFound)
     }
 }

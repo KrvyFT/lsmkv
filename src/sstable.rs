@@ -7,7 +7,7 @@ pub mod sstable_builder {
 
     use crate::{
         error::Result,
-        model::{Key, LogRecord, Value},
+        model::{Key, LogRecord, RecordType, Value},
     };
 
     pub struct SSTableBuilder {
@@ -35,9 +35,9 @@ pub mod sstable_builder {
             for (k, v) in mem_iter {
                 let record = LogRecord {
                     r_type: if v.is_some() {
-                        crate::model::RecordType::Put
+                        RecordType::Put
                     } else {
-                        crate::model::RecordType::Delete
+                        RecordType::Delete
                     },
                     key: k.clone(),
                     value: v.clone(),
@@ -71,7 +71,10 @@ pub mod sstable {
 
     use memmap2::Mmap;
 
-    use crate::{error::DbError, error::Result, model::Key};
+    use crate::{
+        error::{DbError, Result},
+        model::{GetResult, Key, LogRecord, RecordType, Value},
+    };
 
     pub struct SSTable {
         mmap: Arc<Mmap>,
@@ -103,6 +106,27 @@ pub mod sstable {
                 mmap: Arc::new(mmap),
                 index,
             })
+        }
+
+        pub fn get(&self, key: &Key) -> GetResult<Value> {
+            if let Some(&offset) = self.index.get(key) {
+                let mut current = offset as usize;
+
+                let mut len_bytes = [0u8; 4];
+                len_bytes.copy_from_slice(&self.mmap[current..current + 4]);
+                let len = u32::from_le_bytes(len_bytes) as usize;
+                current += 4;
+
+                let payload = &self.mmap[current..current + len];
+                let record: LogRecord = bincode::deserialize(payload).unwrap();
+
+                match record.r_type {
+                    RecordType::Put => GetResult::Found(record.value.unwrap()),
+                    RecordType::Delete => GetResult::Deleted,
+                }
+            } else {
+                GetResult::NotFound
+            }
         }
     }
 }
