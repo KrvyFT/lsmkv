@@ -169,20 +169,6 @@ impl DbKernel {
         Ok(())
     }
 
-    /// Inserts a key-value pair into the database.
-    pub fn put(&mut self, k: Key, v: Value) -> Result<()> {
-        self.write(&WriteBatch {
-            ops: vec![WriteOP::Put(k, v)],
-        })
-    }
-
-    /// Deletes a key from the database using a Tombstone.
-    pub fn delete(&mut self, k: Key) -> Result<()> {
-        self.write(&WriteBatch {
-            ops: vec![WriteOP::Delete(k)],
-        })
-    }
-
     /// Retrieves a value by its key.
     /// Searches in MemTable -> Immutable MemTables -> SSTables in order.
     pub fn get(&self, k: &Key) -> Result<Value> {
