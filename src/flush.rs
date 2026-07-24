@@ -1,6 +1,8 @@
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
-use std::thread;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use tokio::task;
 
 use crate::{error::Result, memtable::MemTable, sstable::sstable_builder::SSTableBuilder};
 
@@ -15,58 +17,61 @@ pub struct FlushResult {
 /// A task dispatched to the background flusher.
 pub enum FlushTask {
     /// Instructs the flusher to write the given Immutable MemTable to disk.
-    Task(Arc<MemTable>),
+    Task(Arc<std::sync::RwLock<MemTable>>),
 }
 
-use lake::thread_pool::ThreadPool;
-
 /// Background task orchestrator for flushing Immutable MemTables to disk.
-/// Uses a thread pool (`lake::ThreadPool`) to execute I/O concurrently.
+/// Uses tokio's `spawn_blocking` to execute I/O concurrently.
 pub struct Flusher {
     task_rx: mpsc::Receiver<FlushTask>,
     result_tx: mpsc::Sender<Result<FlushResult>>,
     sst_dir: PathBuf,
-    pool: ThreadPool,
 }
 
 impl Flusher {
-    /// Creates a new `Flusher` instance with a dedicated thread pool.
+    /// Creates a new `Flusher` instance.
     pub fn new(
         result_tx: mpsc::Sender<Result<FlushResult>>,
         task_rx: mpsc::Receiver<FlushTask>,
         sst_dir: impl Into<PathBuf>,
-        pool_size: usize,
     ) -> Self {
         Self {
             task_rx,
             result_tx,
             sst_dir: sst_dir.into(),
-            pool: ThreadPool::new(pool_size),
         }
     }
 
-    /// Spawns the main dispatch loop in a background thread.
-    /// Listens for `FlushTask`s and delegates them to the `lake` thread pool.
-    pub fn spawn(self) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            while let Ok(task) = self.task_rx.recv() {
-                match task {
-                    FlushTask::Task(mem_table) => {
-                        let id = mem_table.id;
-                        let sst_name = format!("sst_{:06}.sst", id);
-                        let sst_path = self.sst_dir.join(&sst_name);
+    /// Spawns the main dispatch loop in an async tokio task.
+    /// Listens for `FlushTask`s and delegates them to the blocking thread pool.
+    pub fn spawn(mut self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(task_item) = self.task_rx.recv().await {
+                match task_item {
+                    FlushTask::Task(mem_table_lock) => {
                         let result_tx = self.result_tx.clone();
+                        let sst_dir = self.sst_dir.clone();
 
-                        self.pool.execute(move || {
+                        task::spawn_blocking(move || {
+                            // Obtain read lock for the memtable
+                            let mem_table = mem_table_lock.read().unwrap();
+                            let id = mem_table.id;
+                            let sst_name = format!("sst_{:06}.sst", id);
+                            let sst_path = sst_dir.join(&sst_name);
+
                             let builder = SSTableBuilder::new(sst_path.to_str().unwrap());
 
                             let iter = mem_table.iter().map(|(k, v)| (k.clone(), v.clone()));
                             if let Err(e) = builder.build(iter) {
-                                let _ = result_tx.send(Err(e));
+                                // Blockingly send the result back (channel is unbounded or large enough).
+                                // To call async send in spawn_blocking, we use blocking_send if possible.
+                                // Actually, tokio mpsc Sender can only be used with `.await` or `try_send`.
+                                // Since we need to send, we can use `blocking_send()`.
+                                let _ = result_tx.blocking_send(Err(e));
                                 return;
                             }
 
-                            let _ = result_tx.send(Ok(FlushResult {
+                            let _ = result_tx.blocking_send(Ok(FlushResult {
                                 memtable_id: id,
                                 sstable_path: sst_path.to_string_lossy().into_owned(),
                             }));

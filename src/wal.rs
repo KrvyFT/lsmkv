@@ -1,7 +1,8 @@
-use std::{
+use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use tokio::{
     fs::{File, OpenOptions},
-    io::{BufWriter, ErrorKind, Read, Write},
-    path::{Path, PathBuf},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
 };
 
 use crate::{error::DbError, model::LogRecord};
@@ -15,11 +16,13 @@ pub struct WalWriter {
 
 impl WalWriter {
     /// Creates a new `WalWriter` opening a `.log` file in the specified directory.
-    pub fn new(dir: impl AsRef<Path>, initial_id: u64) -> Result<Self, DbError> {
+    pub async fn new(dir: impl AsRef<Path>, initial_id: u64) -> Result<Self, DbError> {
         let dir_path = dir.as_ref().to_path_buf();
 
         if !dir_path.exists() {
-            std::fs::create_dir_all(&dir_path).map_err(|e| DbError::Corruption(e.to_string()))?;
+            tokio::fs::create_dir_all(&dir_path)
+                .await
+                .map_err(|e| DbError::Corruption(e.to_string()))?;
         }
 
         let file_path = Self::build_path(&dir_path, initial_id);
@@ -28,6 +31,7 @@ impl WalWriter {
             .create(true)
             .append(true)
             .open(file_path)
+            .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
         Ok(Self {
@@ -38,14 +42,16 @@ impl WalWriter {
 
     /// Rotates the WAL to a new file with the specified `next_id`.
     /// Flushes and syncs the old file before closing it.
-    pub fn rotate(&mut self, next_id: u64) -> Result<(), DbError> {
+    pub async fn rotate(&mut self, next_id: u64) -> Result<(), DbError> {
         self.writer
             .flush()
+            .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
         self.writer
             .get_mut()
             .sync_all()
+            .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
         let new_path = Self::build_path(&self.dir, next_id);
@@ -53,6 +59,7 @@ impl WalWriter {
             .create(true)
             .append(true)
             .open(new_path)
+            .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
         self.writer = BufWriter::new(file);
@@ -62,12 +69,14 @@ impl WalWriter {
 
     /// Reads and deserializes all records from a WAL file.
     /// Used for crash recovery during database startup.
-    pub fn read_all_records(path: &Path) -> Result<Vec<LogRecord>, DbError> {
-        let mut file = File::open(path).map_err(|e| DbError::Corruption(e.to_string()))?;
+    pub async fn read_all_records(path: &Path) -> Result<Vec<LogRecord>, DbError> {
+        let mut file = File::open(path)
+            .await
+            .map_err(|e| DbError::Corruption(e.to_string()))?;
         let mut records = Vec::new();
         loop {
             let mut len_buf = [0u8; 4];
-            if let Err(e) = file.read_exact(&mut len_buf) {
+            if let Err(e) = file.read_exact(&mut len_buf).await {
                 if e.kind() == ErrorKind::UnexpectedEof {
                     break;
                 }
@@ -78,7 +87,7 @@ impl WalWriter {
             let len = u32::from_le_bytes(len_buf);
             let mut encode = vec![0u8; len as usize];
 
-            if let Err(e) = file.read_exact(&mut encode) {
+            if let Err(e) = file.read_exact(&mut encode).await {
                 eprintln!("Warning: WAL file may be truncated: {}", e);
                 break;
             }
@@ -91,21 +100,21 @@ impl WalWriter {
     }
 
     /// Appends a new `LogRecord` to the WAL in memory buffer.
-    pub fn append(&mut self, record: &LogRecord) -> Result<(), DbError> {
+    pub async fn append(&mut self, record: &LogRecord) -> Result<(), DbError> {
         let encode: Vec<u8> = bincode::serialize(record)?;
         let len = encode.len() as u32;
-        self.writer.write_all(&len.to_le_bytes())?;
-        self.writer.write_all(&encode)?;
+        self.writer.write_all(&len.to_le_bytes()).await?;
+        self.writer.write_all(&encode).await?;
 
         Ok(())
     }
 
     /// Flushes the internal buffer and forces an fsync to ensure durability.
-    pub fn sync(&mut self) -> Result<(), DbError> {
+    pub async fn sync(&mut self) -> Result<(), DbError> {
         // 必须先调用 flush()，将 BufWriter 在内存里缓冲的字节推入操作系统的内核态
-        self.writer.flush()?;
+        self.writer.flush().await?;
         // 然后再调用底层 File 的 sync_data()，让操作系统把内核态的数据刷入物理硬盘
-        self.writer.get_mut().sync_data()?;
+        self.writer.get_mut().sync_data().await?;
 
         Ok(())
     }
