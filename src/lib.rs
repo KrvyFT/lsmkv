@@ -25,6 +25,15 @@ enum WriteOP {
     Delete(Key),
 }
 
+impl WriteOP {
+    fn approx_size(&self) -> usize {
+        match self {
+            WriteOP::Put(k, v) => k.len() + v.len(),
+            WriteOP::Delete(k) => k.len(),
+        }
+    }
+}
+
 struct WriteMessage {
     op: WriteOP,
     responder: oneshot::Sender<Result<()>>,
@@ -47,8 +56,7 @@ impl Core {
         self.imm_memtables
             .retain(|imm| imm.read().unwrap().id != result.memtable_id);
 
-        let wal_path = Path::new(&self.wal_dir)
-            .join(format!("log_{:06}.log", result.memtable_id));
+        let wal_path = Path::new(&self.wal_dir).join(format!("log_{:06}.log", result.memtable_id));
         let _ = std::fs::remove_file(wal_path);
     }
 }
@@ -194,7 +202,8 @@ impl LsmKv {
         if self.write_tx.send(msg).await.is_err() {
             return Err(DbError::Corruption("Writer task dropped".into()));
         }
-        rx.await.unwrap_or(Err(DbError::Corruption("Writer task dropped".into())))
+        rx.await
+            .unwrap_or(Err(DbError::Corruption("Writer task dropped".into())))
     }
 
     /// Asynchronously deletes a key-value pair from the database.
@@ -207,7 +216,8 @@ impl LsmKv {
         if self.write_tx.send(msg).await.is_err() {
             return Err(DbError::Corruption("Writer task dropped".into()));
         }
-        rx.await.unwrap_or(Err(DbError::Corruption("Writer task dropped".into())))
+        rx.await
+            .unwrap_or(Err(DbError::Corruption("Writer task dropped".into())))
     }
 
     async fn writer_task(
@@ -222,14 +232,20 @@ impl LsmKv {
         };
 
         while let Some(first_msg) = rx.recv().await {
+            let mut batch_bytes = first_msg.op.approx_size();
             let mut ops = vec![first_msg.op];
             let mut responders = vec![first_msg.responder];
 
-            // Aggressive batching for Group Commit
+            const MAX_BATCH_BYTES: usize = 1024 * 1024; // 1MB
+            const MAX_BATCH_COUNT: usize = 1000;
+
+            // Aggressive batching for Group Commit with dual watermarks
             while let Ok(msg) = rx.try_recv() {
+                batch_bytes += msg.op.approx_size();
                 ops.push(msg.op);
                 responders.push(msg.responder);
-                if ops.len() >= 10000 {
+                
+                if ops.len() >= MAX_BATCH_COUNT || batch_bytes >= MAX_BATCH_BYTES {
                     break;
                 }
             }
@@ -271,7 +287,7 @@ impl LsmKv {
             {
                 let memtable_arc = { core.read().unwrap().memtable.clone() };
                 let mut memtable = memtable_arc.write().unwrap();
-                
+
                 for op in &ops {
                     match op {
                         WriteOP::Put(k, v) => memtable.put(k.clone(), Some(v.clone())),
@@ -285,12 +301,12 @@ impl LsmKv {
 
             if should_rotate {
                 next_file_id += 1;
-                
+
                 let old_memtable_arc = {
                     let mut core_write = core.write().unwrap();
                     let old = core_write.memtable.clone();
                     core_write.imm_memtables.push(old.clone());
-                    
+
                     let new_memtable = Arc::new(RwLock::new(MemTable::new(next_file_id)));
                     core_write.memtable = new_memtable;
                     old
