@@ -5,11 +5,36 @@ pub mod sstable_builder {
         io::{BufWriter, Write},
     };
 
+    use crate::error::DbError;
     use crate::{
         error::Result,
         model::{Key, LogRecord, RecordType, Value},
     };
 
+    const TARGET_BLOCK_SIZE: usize = 4096;
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum CompressionType {
+        None = 0,
+        Snappy = 1,
+        Zstd = 2,
+    }
+
+    impl TryFrom<u8> for CompressionType {
+        type Error = DbError;
+        fn try_from(val: u8) -> Result<Self> {
+            match val {
+                0 => Ok(Self::None),
+                1 => Ok(Self::Snappy),
+                2 => Ok(Self::Zstd),
+                _ => Err(DbError::Corruption(format!(
+                    "Unknown compression type: {}",
+                    val
+                ))),
+            }
+        }
+    }
     /// Builder for constructing Sorted String Tables (SSTables).
     /// Used by the background flusher to write MemTables to disk.
     pub struct SSTableBuilder {
@@ -37,33 +62,70 @@ pub mod sstable_builder {
         /// Builds the SSTable by writing all key-value pairs from the given iterator.
         /// Flushes the index and footer at the end of the file.
         pub fn build(mut self, mem_iter: impl Iterator<Item = (Key, Option<Value>)>) -> Result<()> {
+            let mut current_block_records = Vec::new();
+            let mut current_block_size = 0;
+            let mut current_block_start_key = None;
+
             for (k, v) in mem_iter {
+                if current_block_records.is_empty() {
+                    current_block_start_key = Some(k.clone());
+                }
+
                 let record = LogRecord {
                     r_type: if v.is_some() {
                         RecordType::Put
                     } else {
                         RecordType::Delete
                     },
-                    key: k.clone(),
-                    value: v.clone(),
+                    key: k,
+                    value: v,
                 };
 
-                let encode = bincode::serialize(&record)?;
+                let record_size = bincode::serialized_size(&record)? as usize;
+                current_block_size += record_size;
+                current_block_records.push(record);
 
-                self.index.insert(k, self.current_offset);
-                let len = encode.len() as u32;
+                if current_block_size >= TARGET_BLOCK_SIZE {
+                    let encode = bincode::serialize(&current_block_records)?;
+                    let payload = zstd::encode_all(encode.as_slice(), 3)
+                        .map_err(|e| DbError::IO(e.into()))?;
 
-                self.writer.write(&len.to_le_bytes())?;
-                self.writer.write_all(&encode)?;
+                    let len = payload.len() as u64;
 
-                self.current_offset += (len as u64) + 4;
+                    self.index
+                        .insert(current_block_start_key.take().unwrap(), self.current_offset);
+                    self.writer.write_all(&len.to_le_bytes())?;
+                    self.writer.write_all(&payload)?;
+
+                    self.current_offset += len + 8;
+                    current_block_size = 0;
+                    current_block_records.clear();
+                }
+            }
+
+            if !current_block_records.is_empty() {
+                let encode = bincode::serialize(&current_block_records)?;
+                let payload = zstd::encode_all(encode.as_slice(), 3)
+                    .map_err(|e| crate::error::DbError::IO(e))?;
+                let len = payload.len() as u64;
+                self.index
+                    .insert(current_block_start_key.take().unwrap(), self.current_offset);
+
+                self.writer.write_all(&len.to_le_bytes())?;
+                self.writer.write_all(&payload)?;
+
+                self.current_offset += len + 8;
             }
             let index_offset = self.current_offset;
             let encode = bincode::serialize(&self.index)?;
             self.writer.write_all(&encode)?;
 
             self.writer.write_all(&index_offset.to_le_bytes())?;
-            self.writer.write_all(&0x8888_u64.to_le_bytes())?;
+
+            self.writer.write_all(&[CompressionType::Zstd as u8])?;
+            self.writer.write_all(&[0u8; 7])?;
+
+            self.writer.write_all(&0x888A_u64.to_le_bytes())?;
 
             self.writer.flush()?;
             Ok(())
@@ -72,13 +134,14 @@ pub mod sstable_builder {
 }
 
 pub mod sstable {
-    use std::{collections::BTreeMap, fs::File, sync::Arc};
+    use std::{borrow::Cow, collections::BTreeMap, fs::File, sync::Arc};
 
     use memmap2::Mmap;
 
     use crate::{
         error::{DbError, Result},
         model::{GetResult, Key, LogRecord, RecordType, Value},
+        sstable::sstable_builder::CompressionType,
     };
 
     /// A Sorted String Table (SSTable) residing on disk.
@@ -86,6 +149,7 @@ pub mod sstable {
     pub struct SSTable {
         mmap: Arc<Mmap>,
         index: BTreeMap<Key, u64>,
+        compression: CompressionType,
     }
 
     impl SSTable {
@@ -95,47 +159,74 @@ pub mod sstable {
             let mmap = unsafe { Mmap::map(&file)? };
 
             let len = mmap.len();
-            let footer = &mmap[(len - 16)..];
+            if len < 24 {
+                return Err(DbError::Corruption("SSTable file is too short.".into()));
+            }
 
             let mut magic_bytes = [0u8; 8];
-            magic_bytes.copy_from_slice(&footer[8..]);
+            magic_bytes.copy_from_slice(&mmap[(len - 8)..]);
 
-            if u64::from_le_bytes(magic_bytes) != 0x8888 {
+            if u64::from_le_bytes(magic_bytes) != 0x888A {
                 return Err(DbError::Corruption("Bad Magic".into()));
             }
 
             let mut offset_bytes = [0u8; 8];
-            offset_bytes.copy_from_slice(&footer[0..8]);
+            offset_bytes.copy_from_slice(&mmap[(len - 24)..(len - 16)]);
             let index_offset = u64::from_le_bytes(offset_bytes);
 
-            let index_data = &mmap[index_offset as usize..(len - 16)];
+            let compression = CompressionType::try_from(mmap[len - 16])?;
+
+            let index_data = &mmap[index_offset as usize..(len - 24)];
+
             let index: BTreeMap<Key, u64> = bincode::deserialize(index_data)?;
             Ok(Self {
                 mmap: Arc::new(mmap),
                 index,
+                compression,
             })
         }
 
         /// Retrieves a value by key directly from the mmap-backed file.
-        /// Uses the loaded BTreeMap index to find the exact byte offset.
+        /// Uses the loaded BTreeMap sparse index to find the block, decompresses it,
+        /// and binary searches within the block.
         pub fn get(&self, key: &Key) -> GetResult<Value> {
-            if let Some(&offset) = self.index.get(key) {
-                let mut current = offset as usize;
+            // 稀疏索引：寻找“小于等于给定 Key 的最大起始 Key”所对应的 Block
+            let block_offset = match self.index.range(..=key.clone()).next_back() {
+                Some((_, &offset)) => offset,
+                None => return GetResult::NotFound,
+            };
 
-                let mut len_bytes = [0u8; 4];
-                len_bytes.copy_from_slice(&self.mmap[current..current + 4]);
-                let len = u32::from_le_bytes(len_bytes) as usize;
-                current += 4;
+            let mut current = block_offset as usize;
+            let mut len_bytes = [0u8; 8];
+            len_bytes.copy_from_slice(&self.mmap[current..current + 8]);
+            let block_len = u64::from_le_bytes(len_bytes) as usize;
+            current += 8;
 
-                let payload = &self.mmap[current..current + len];
-                let record: LogRecord = bincode::deserialize(payload).unwrap();
-
-                match record.r_type {
-                    RecordType::Put => GetResult::Found(record.value.unwrap()),
-                    RecordType::Delete => GetResult::Deleted,
+            let raw_payload = &self.mmap[current..current + block_len];
+            let payload = match self.compression {
+                CompressionType::None => Cow::Borrowed(raw_payload),
+                CompressionType::Zstd => {
+                    let decoded =
+                        zstd::decode_all(raw_payload).expect("Zstd 解压崩溃：底层块数据可能已损坏");
+                    Cow::Owned(decoded)
                 }
-            } else {
-                GetResult::NotFound
+                _ => unimplemented!("尚未支持其他解压算法"),
+            };
+
+            let records: Vec<LogRecord> = match bincode::deserialize(&payload) {
+                Ok(r) => r,
+                Err(e) => return GetResult::Error(e.to_string()),
+            };
+
+            match records.binary_search_by(|r| r.key.cmp(key)) {
+                Ok(idx) => {
+                    let record = &records[idx];
+                    match record.r_type {
+                        RecordType::Put => GetResult::Found(record.value.clone().unwrap()),
+                        RecordType::Delete => GetResult::Deleted,
+                    }
+                }
+                Err(_) => GetResult::NotFound,
             }
         }
     }

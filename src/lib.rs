@@ -168,6 +168,7 @@ impl LsmKv {
             GetResult::Found(v) => return Ok(v.clone()),
             GetResult::Deleted => return Err(DbError::NotFound),
             GetResult::NotFound => {}
+            GetResult::Error(e) => return Err(DbError::Corruption(e)),
         }
         drop(mem);
 
@@ -177,6 +178,7 @@ impl LsmKv {
                 GetResult::Found(v) => return Ok(v.clone()),
                 GetResult::Deleted => return Err(DbError::NotFound),
                 GetResult::NotFound => continue,
+                GetResult::Error(e) => return Err(DbError::Corruption(e)),
             }
         }
 
@@ -185,6 +187,7 @@ impl LsmKv {
                 GetResult::Found(v) => return Ok(v.clone()),
                 GetResult::Deleted => return Err(DbError::NotFound),
                 GetResult::NotFound => continue,
+                GetResult::Error(e) => return Err(DbError::Corruption(e)),
             }
         }
 
@@ -244,7 +247,7 @@ impl LsmKv {
                 batch_bytes += msg.op.approx_size();
                 ops.push(msg.op);
                 responders.push(msg.responder);
-                
+
                 if ops.len() >= MAX_BATCH_COUNT || batch_bytes >= MAX_BATCH_BYTES {
                     break;
                 }

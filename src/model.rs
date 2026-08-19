@@ -33,4 +33,6 @@ pub enum GetResult<T> {
     Deleted,
     /// Key was not found in the current component.
     NotFound,
+
+    Error(String),
 }
