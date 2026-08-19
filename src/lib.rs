@@ -61,6 +61,9 @@ impl Core {
     }
 }
 
+/// 写入通道的最大排队请求数，超过此数值后的并发写入将被反压 (Backpressure) 阻塞
+const MAX_WRITE_QUEUE_SIZE: usize = 1024;
+
 /// A high-performance, thread-safe LSM-Tree database library interface.
 #[derive(Clone)]
 pub struct LsmKv {
@@ -140,7 +143,7 @@ impl LsmKv {
             wal_dir: dir.to_string(),
         }));
 
-        let (write_tx, write_rx) = mpsc::channel(10000);
+        let (write_tx, write_rx) = mpsc::channel(MAX_WRITE_QUEUE_SIZE);
 
         // Spawn writer task
         let writer_core = core.clone();
@@ -376,6 +379,49 @@ mod tests {
         for i in 0..100 {
             let k = format!("key{}", i).into_bytes();
             let expected_v = format!("value{}", i).into_bytes();
+            let val = kv.get(&k).unwrap();
+            assert_eq!(val, expected_v);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lsmkv_stress_compression_and_flush() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let kv = LsmKv::open(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let num_records = 50_000;
+
+        // 并发写入大量数据，确保触发 Dual-Watermark 批处理、MemTable 刷盘以及 SSTable 的 Zstd 分块压缩
+        let mut handles = vec![];
+        // 100 个并发任务，每个任务写入 500 条数据
+        for i in 0..100 {
+            let kv_clone = kv.clone();
+            let handle = tokio::spawn(async move {
+                for j in 0..500 {
+                    let id = i * 500 + j;
+                    let k = format!("stress_key_{:06}", id).into_bytes();
+                    // 构造具有一定体积的 Value，使得 50000 个 KV 总量远超 1MB 阈值，从而频繁触发 Flush 和 Zstd Block 切割
+                    let v = format!("stress_value_payload_{}_{}", id, "X".repeat(128)).into_bytes();
+                    kv_clone.put(k, v).await.unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // 等待所有并发写入完成
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // 采样+随机跳跃式读取，严酷验证稀疏索引(Sparse Index)的范围查找和 Zstd 块解压逻辑的正确性
+        for id in (0..num_records).step_by(17) {
+            let k = format!("stress_key_{:06}", id).into_bytes();
+            let expected_v =
+                format!("stress_value_payload_{}_{}", id, "X".repeat(128)).into_bytes();
+
+            // 如果这里解压崩溃或报 NotFound，说明写入链路的闭环有 Bug
             let val = kv.get(&k).unwrap();
             assert_eq!(val, expected_v);
         }

@@ -205,11 +205,10 @@ pub mod sstable {
             let raw_payload = &self.mmap[current..current + block_len];
             let payload = match self.compression {
                 CompressionType::None => Cow::Borrowed(raw_payload),
-                CompressionType::Zstd => {
-                    let decoded =
-                        zstd::decode_all(raw_payload).expect("Zstd 解压崩溃：底层块数据可能已损坏");
-                    Cow::Owned(decoded)
-                }
+                CompressionType::Zstd => match zstd::decode_all(raw_payload) {
+                    Ok(decoded) => Cow::Owned(decoded),
+                    Err(e) => return GetResult::Error(format!("Zstd 解压崩溃: {}", e)),
+                },
                 _ => unimplemented!("尚未支持其他解压算法"),
             };
 
