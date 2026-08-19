@@ -9,6 +9,8 @@ memmap2 = "0.9.11"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
+zstd = "0.13.3"
+
 
 [dev-dependencies]
 tempfile = "3.27.0"
