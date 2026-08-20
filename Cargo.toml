@@ -3,7 +3,7 @@ name = "lsmkv"
 version = "0.1.0"
 edition = "2024"
 description = "A high-performance, async-first Log-Structured Merge-Tree (LSM-Tree) Key-Value storage engine."
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/KrvyFT/lsmkv"
 
 [dependencies]
