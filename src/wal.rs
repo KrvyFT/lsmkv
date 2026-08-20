@@ -80,16 +80,14 @@ impl WalWriter {
                 if e.kind() == ErrorKind::UnexpectedEof {
                     break;
                 }
-                eprintln!("Warning: WAL file may be truncated: {}", e);
-                break;
+                return Err(DbError::Corruption(format!("WAL file may be truncated: {}", e)));
             }
 
             let len = u32::from_le_bytes(len_buf);
             let mut encode = vec![0u8; len as usize];
 
             if let Err(e) = file.read_exact(&mut encode).await {
-                eprintln!("Warning: WAL file may be truncated: {}", e);
-                break;
+                return Err(DbError::Corruption(format!("WAL file may be truncated: {}", e)));
             }
 
             let record: LogRecord =

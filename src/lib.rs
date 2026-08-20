@@ -148,13 +148,17 @@ impl LsmKv {
 
         // Spawn writer task
         let writer_core = core.clone();
-        tokio::spawn(Self::writer_task(
-            writer_core,
-            wal,
-            write_rx,
-            flush_tx,
-            options.clone(),
-        ));
+        tokio::spawn(async move {
+            if let Err(e) = Self::writer_task(
+                writer_core,
+                wal,
+                write_rx,
+                flush_tx,
+                options.clone(),
+            ).await {
+                panic!("Writer task failed: {:?}", e);
+            }
+        });
 
         // Spawn flush result receiver task
         let result_core = core.clone();
@@ -239,7 +243,7 @@ impl LsmKv {
         mut rx: mpsc::Receiver<WriteMessage>,
         flush_tx: mpsc::Sender<FlushTask>,
         options: Arc<DbOptions>,
-    ) {
+    ) -> Result<()> {
         let mut next_file_id = {
             let core_read = core.read().unwrap();
             core_read.memtable.read().unwrap().id
@@ -329,11 +333,11 @@ impl LsmKv {
                 };
 
                 if let Err(e) = wal.rotate(next_file_id).await {
-                    eprintln!("Error rotating WAL: {}", e);
+                    return Err(DbError::Corruption(format!("Error rotating WAL: {}", e)));
                 }
 
                 if let Err(e) = flush_tx.send(FlushTask::Task(old_memtable_arc)).await {
-                    eprintln!("Error sending flush task: {}", e);
+                    return Err(DbError::Corruption(format!("Error sending flush task: {}", e)));
                 }
             }
 
@@ -341,6 +345,7 @@ impl LsmKv {
                 let _ = responder.send(Ok(()));
             }
         }
+        Ok(())
     }
 }
 
