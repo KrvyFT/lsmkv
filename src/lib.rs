@@ -2,6 +2,7 @@ pub mod error;
 pub mod flush;
 pub mod memtable;
 pub mod model;
+pub mod options;
 pub mod sstable;
 pub mod wal;
 
@@ -14,8 +15,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     error::{DbError, Result},
     flush::{FlushResult, FlushTask, Flusher},
-    memtable::{MEM_TABLE_MAX_SIZE, MemTable},
+    memtable::MemTable,
     model::{GetResult, Key, LogRecord, RecordType, Value},
+    options::DbOptions,
     sstable::sstable::SSTable,
     wal::WalWriter,
 };
@@ -44,7 +46,7 @@ struct Core {
     memtable: Arc<RwLock<MemTable>>,
     imm_memtables: Vec<Arc<RwLock<MemTable>>>,
     sstables: Vec<Arc<SSTable>>,
-    wal_dir: String,
+    options: Arc<DbOptions>,
 }
 
 impl Core {
@@ -56,13 +58,13 @@ impl Core {
         self.imm_memtables
             .retain(|imm| imm.read().unwrap().id != result.memtable_id);
 
-        let wal_path = Path::new(&self.wal_dir).join(format!("log_{:06}.log", result.memtable_id));
+        let wal_path = self
+            .options
+            .dir
+            .join(format!("log_{:06}.log", result.memtable_id));
         let _ = std::fs::remove_file(wal_path);
     }
 }
-
-/// 写入通道的最大排队请求数，超过此数值后的并发写入将被反压 (Backpressure) 阻塞
-const MAX_WRITE_QUEUE_SIZE: usize = 1024;
 
 /// A high-performance, thread-safe LSM-Tree database library interface.
 #[derive(Clone)]
@@ -73,8 +75,10 @@ pub struct LsmKv {
 
 impl LsmKv {
     /// Opens or creates a new `LsmKv` instance, recovering from the WAL log if it exists.
-    pub async fn open(dir: &str) -> Result<Self> {
-        let dir_path = Path::new(dir);
+    pub async fn open(options: DbOptions) -> Result<Self> {
+        let options = Arc::new(options);
+        let dir_path = &options.dir;
+
         if !dir_path.exists() {
             tokio::fs::create_dir_all(dir_path)
                 .await
@@ -97,10 +101,10 @@ impl LsmKv {
 
         wal_files.sort_by_key(|k| k.0);
 
-        let (flush_tx, flush_rx) = mpsc::channel(100);
-        let (result_tx, mut result_rx) = mpsc::channel(100);
+        let (flush_tx, flush_rx) = mpsc::channel(options.flush_queue_size);
+        let (result_tx, mut result_rx) = mpsc::channel(options.flush_queue_size);
 
-        let flusher = Flusher::new(result_tx, flush_rx, dir);
+        let flusher = Flusher::new(result_tx, flush_rx, options.clone());
         flusher.spawn();
 
         let mut imm_memtables = Vec::new();
@@ -134,20 +138,26 @@ impl LsmKv {
             }
         }
 
-        let wal = WalWriter::new(dir, next_file_id).await?;
+        let wal = WalWriter::new(dir_path, next_file_id).await?;
 
         let core = Arc::new(RwLock::new(Core {
             memtable: active_memtable.unwrap(),
             imm_memtables,
             sstables: Vec::new(),
-            wal_dir: dir.to_string(),
+            options: options.clone(),
         }));
 
-        let (write_tx, write_rx) = mpsc::channel(MAX_WRITE_QUEUE_SIZE);
+        let (write_tx, write_rx) = mpsc::channel(options.max_write_queue_size);
 
         // Spawn writer task
         let writer_core = core.clone();
-        tokio::spawn(Self::writer_task(writer_core, wal, write_rx, flush_tx));
+        tokio::spawn(Self::writer_task(
+            writer_core,
+            wal,
+            write_rx,
+            flush_tx,
+            options.clone(),
+        ));
 
         // Spawn flush result receiver task
         let result_core = core.clone();
@@ -231,6 +241,7 @@ impl LsmKv {
         mut wal: WalWriter,
         mut rx: mpsc::Receiver<WriteMessage>,
         flush_tx: mpsc::Sender<FlushTask>,
+        options: Arc<DbOptions>,
     ) {
         let mut next_file_id = {
             let core_read = core.read().unwrap();
@@ -242,16 +253,13 @@ impl LsmKv {
             let mut ops = vec![first_msg.op];
             let mut responders = vec![first_msg.responder];
 
-            const MAX_BATCH_BYTES: usize = 1024 * 1024; // 1MB
-            const MAX_BATCH_COUNT: usize = 1000;
-
             // Aggressive batching for Group Commit with dual watermarks
             while let Ok(msg) = rx.try_recv() {
                 batch_bytes += msg.op.approx_size();
                 ops.push(msg.op);
                 responders.push(msg.responder);
 
-                if ops.len() >= MAX_BATCH_COUNT || batch_bytes >= MAX_BATCH_BYTES {
+                if ops.len() >= options.max_batch_count || batch_bytes >= options.max_batch_bytes {
                     break;
                 }
             }
@@ -300,7 +308,7 @@ impl LsmKv {
                         WriteOP::Delete(k) => memtable.put(k.clone(), None),
                     }
                 }
-                if memtable.approx_size >= MEM_TABLE_MAX_SIZE {
+                if memtable.approx_size >= options.mem_table_max_size {
                     should_rotate = true;
                 }
             }
@@ -342,7 +350,13 @@ mod tests {
     #[tokio::test]
     async fn test_lsmkv_basic_put_get() {
         let dir = tempdir().unwrap();
-        let kv = LsmKv::open(dir.path().to_str().unwrap()).await.unwrap();
+        let options = options::DbOptions::builder()
+            .dir(dir.path())
+            .mem_table_max_size(1024)
+            .max_batch_count(10)
+            .build();
+
+        let kv = LsmKv::open(options).await.unwrap();
 
         kv.put(b"key1".to_vec(), b"value1".to_vec()).await.unwrap();
         let val = kv.get(&b"key1".to_vec()).unwrap();
@@ -359,7 +373,12 @@ mod tests {
     #[tokio::test]
     async fn test_lsmkv_concurrent_writes() {
         let dir = tempdir().unwrap();
-        let kv = LsmKv::open(dir.path().to_str().unwrap()).await.unwrap();
+        let options = options::DbOptions::builder()
+            .dir(dir.path())
+            .mem_table_max_size(1024)
+            .max_batch_count(10)
+            .build();
+        let kv = LsmKv::open(options).await.unwrap();
 
         let mut handles = vec![];
         for i in 0..100 {
@@ -387,9 +406,13 @@ mod tests {
     #[tokio::test]
     async fn test_lsmkv_stress_compression_and_flush() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let kv = LsmKv::open(temp_dir.path().to_str().unwrap())
-            .await
-            .unwrap();
+        let options = options::DbOptions::builder()
+            .dir(temp_dir.path())
+            .mem_table_max_size(1024)
+            .max_batch_count(10)
+            .build();
+
+        let kv = LsmKv::open(options).await.unwrap();
 
         let num_records = 50_000;
 

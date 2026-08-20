@@ -4,7 +4,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::{error::Result, memtable::MemTable, sstable::sstable_builder::SSTableBuilder};
+use crate::{
+    error::Result, memtable::MemTable, options::DbOptions, sstable::sstable_builder::SSTableBuilder,
+};
 
 /// Result of a successful background flush operation.
 pub struct FlushResult {
@@ -25,7 +27,7 @@ pub enum FlushTask {
 pub struct Flusher {
     task_rx: mpsc::Receiver<FlushTask>,
     result_tx: mpsc::Sender<Result<FlushResult>>,
-    sst_dir: PathBuf,
+    options: Arc<DbOptions>,
 }
 
 impl Flusher {
@@ -33,12 +35,12 @@ impl Flusher {
     pub fn new(
         result_tx: mpsc::Sender<Result<FlushResult>>,
         task_rx: mpsc::Receiver<FlushTask>,
-        sst_dir: impl Into<PathBuf>,
+        options: Arc<DbOptions>,
     ) -> Self {
         Self {
             task_rx,
             result_tx,
-            sst_dir: sst_dir.into(),
+            options,
         }
     }
 
@@ -50,16 +52,21 @@ impl Flusher {
                 match task_item {
                     FlushTask::Task(mem_table_lock) => {
                         let result_tx = self.result_tx.clone();
-                        let sst_dir = self.sst_dir.clone();
+                        let options = self.options.clone();
 
                         task::spawn_blocking(move || {
                             // Obtain read lock for the memtable
                             let mem_table = mem_table_lock.read().unwrap();
                             let id = mem_table.id;
                             let sst_name = format!("sst_{:06}.sst", id);
-                            let sst_path = sst_dir.join(&sst_name);
+                            let sst_path = options.dir.join(&sst_name);
 
-                            let builder = SSTableBuilder::new(sst_path.to_str().unwrap());
+                            let builder = SSTableBuilder::new(
+                                sst_path.to_str().unwrap(),
+                                options.sstable_block_size,
+                                options.compression_type,
+                                options.compression_level,
+                            );
 
                             let iter = mem_table.iter().map(|(k, v)| (k.clone(), v.clone()));
                             if let Err(e) = builder.build(iter) {

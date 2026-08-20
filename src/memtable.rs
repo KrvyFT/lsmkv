@@ -5,9 +5,6 @@ use crate::{
     model::{GetResult, Key, Value},
 };
 
-/// Maximum approximate size of a MemTable before it gets flushed to disk.
-pub static MEM_TABLE_MAX_SIZE: usize = 4 * 1024 * 1024;
-
 /// An in-memory key-value store backed by a BTreeMap.
 /// This is the first level of storage in the LSM-Tree where all recent writes are buffered.
 pub struct MemTable {

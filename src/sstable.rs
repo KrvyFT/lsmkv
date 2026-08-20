@@ -11,8 +11,6 @@ pub mod sstable_builder {
         model::{Key, LogRecord, RecordType, Value},
     };
 
-    const TARGET_BLOCK_SIZE: usize = 4096;
-
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub enum CompressionType {
@@ -41,11 +39,19 @@ pub mod sstable_builder {
         writer: BufWriter<File>,
         index: BTreeMap<Key, u64>,
         current_offset: u64,
+        block_size: usize,
+        compression_type: CompressionType,
+        compression_level: i32,
     }
 
     impl SSTableBuilder {
         /// Creates a new `SSTableBuilder` targeting the specified file path.
-        pub fn new(path: &str) -> Self {
+        pub fn new(
+            path: &str,
+            block_size: usize,
+            compression_type: CompressionType,
+            compression_level: i32,
+        ) -> Self {
             let file = OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -56,6 +62,9 @@ pub mod sstable_builder {
                 writer: BufWriter::new(file),
                 index: BTreeMap::new(),
                 current_offset: 0,
+                block_size,
+                compression_type,
+                compression_level,
             }
         }
 
@@ -85,10 +94,14 @@ pub mod sstable_builder {
                 current_block_size += record_size;
                 current_block_records.push(record);
 
-                if current_block_size >= TARGET_BLOCK_SIZE {
+                if current_block_size >= self.block_size {
                     let encode = bincode::serialize(&current_block_records)?;
-                    let payload = zstd::encode_all(encode.as_slice(), 3)
-                        .map_err(|e| DbError::IO(e.into()))?;
+                    let payload = match self.compression_type {
+                        CompressionType::None => encode,
+                        CompressionType::Snappy => return Err(DbError::Corruption("Snappy not implemented".to_string())),
+                        CompressionType::Zstd => zstd::encode_all(encode.as_slice(), self.compression_level)
+                            .map_err(|e| DbError::IO(e.into()))?,
+                    };
 
                     let len = payload.len() as u64;
 
@@ -105,8 +118,12 @@ pub mod sstable_builder {
 
             if !current_block_records.is_empty() {
                 let encode = bincode::serialize(&current_block_records)?;
-                let payload = zstd::encode_all(encode.as_slice(), 3)
-                    .map_err(|e| crate::error::DbError::IO(e))?;
+                let payload = match self.compression_type {
+                    CompressionType::None => encode,
+                    CompressionType::Snappy => return Err(DbError::Corruption("Snappy not implemented".to_string())),
+                    CompressionType::Zstd => zstd::encode_all(encode.as_slice(), self.compression_level)
+                        .map_err(|e| crate::error::DbError::IO(e))?,
+                };
                 let len = payload.len() as u64;
                 self.index
                     .insert(current_block_start_key.take().unwrap(), self.current_offset);
@@ -122,7 +139,7 @@ pub mod sstable_builder {
 
             self.writer.write_all(&index_offset.to_le_bytes())?;
 
-            self.writer.write_all(&[CompressionType::Zstd as u8])?;
+            self.writer.write_all(&[self.compression_type as u8])?;
             self.writer.write_all(&[0u8; 7])?;
 
             self.writer.write_all(&0x888A_u64.to_le_bytes())?;
