@@ -262,20 +262,25 @@ impl LsmKv {
             }
 
             let mut err = None;
-            for op in &ops {
+            let mut records = Vec::with_capacity(ops.len());
+            for op in ops {
                 let record = match op {
                     WriteOP::Put(k, v) => LogRecord {
                         r_type: RecordType::Put,
-                        key: k.clone(),
-                        value: Some(v.clone()),
+                        key: k,
+                        value: Some(v),
                     },
                     WriteOP::Delete(k) => LogRecord {
                         r_type: RecordType::Delete,
-                        key: k.clone(),
+                        key: k,
                         value: None,
                     },
                 };
-                if let Err(e) = wal.append(&record).await {
+                records.push(record);
+            }
+
+            for record in &records {
+                if let Err(e) = wal.append(record).await {
                     err = Some(e);
                     break;
                 }
@@ -291,7 +296,7 @@ impl LsmKv {
                 for responder in responders {
                     let _ = responder.send(Err(DbError::Corruption(e.to_string())));
                 }
-                continue;
+                panic!("Fatal I/O error during WAL write. Circuit breaker tripped to prevent data corruption. Error: {}", e);
             }
 
             let mut should_rotate = false;
@@ -299,10 +304,10 @@ impl LsmKv {
                 let memtable_arc = { core.read().unwrap().memtable.clone() };
                 let mut memtable = memtable_arc.write().unwrap();
 
-                for op in &ops {
-                    match op {
-                        WriteOP::Put(k, v) => memtable.put(k.clone(), Some(v.clone())),
-                        WriteOP::Delete(k) => memtable.put(k.clone(), None),
+                for record in records {
+                    match record.r_type {
+                        RecordType::Put => memtable.put(record.key, record.value),
+                        RecordType::Delete => memtable.put(record.key, None),
                     }
                 }
                 if memtable.approx_size >= options.mem_table_max_size {
