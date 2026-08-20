@@ -2,6 +2,9 @@
 name = "lsmkv"
 version = "0.1.0"
 edition = "2024"
+description = "A high-performance, async-first Log-Structured Merge-Tree (LSM-Tree) Key-Value storage engine."
+license = "MIT"
+repository = "https://github.com/KrvyFT/lsmkv"
 
 [dependencies]
 bincode = "1.3.3"
