@@ -1,3 +1,14 @@
+//! Write-Ahead Log (WAL) Implementation.
+//! 
+//! The WAL ensures data durability by appending all operations to a sequential log file
+//! before they are applied to the MemTable.
+//! 
+//! # Binary Layout
+//! Each record in the WAL is structured as:
+//! `[Length: u32 (4 bytes, Little Endian)] [Payload: bincode encoded LogRecord]`
+//! 
+//! Files are rotated sequentially (e.g. `log_000000.log`, `log_000001.log`).
+
 use std::path::{Path, PathBuf};
 use std::io::ErrorKind;
 use tokio::{
@@ -16,6 +27,10 @@ pub struct WalWriter {
 
 impl WalWriter {
     /// Creates a new `WalWriter` opening a `.log` file in the specified directory.
+    ///
+    /// # Errors
+    /// Returns `DbError::Corruption` if the directory cannot be created, or if the
+    /// log file cannot be opened/created.
     pub async fn new(dir: impl AsRef<Path>, initial_id: u64) -> Result<Self, DbError> {
         let dir_path = dir.as_ref().to_path_buf();
 
@@ -42,18 +57,25 @@ impl WalWriter {
 
     /// Rotates the WAL to a new file with the specified `next_id`.
     /// Flushes and syncs the old file before closing it.
+    ///
+    /// # Errors
+    /// Returns `DbError::Corruption` if flushing the old file fails, or if creating
+    /// the new log file fails.
     pub async fn rotate(&mut self, next_id: u64) -> Result<(), DbError> {
+        // Flush the buffered writer to the OS
         self.writer
             .flush()
             .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
+        // Fsync the underlying file descriptor to ensure durability before closing
         self.writer
             .get_mut()
             .sync_all()
             .await
             .map_err(|e| DbError::Corruption(e.to_string()))?;
 
+        // Open the next WAL file
         let new_path = Self::build_path(&self.dir, next_id);
         let file = OpenOptions::new()
             .create(true)
@@ -69,6 +91,10 @@ impl WalWriter {
 
     /// Reads and deserializes all records from a WAL file.
     /// Used for crash recovery during database startup.
+    ///
+    /// # Errors
+    /// Returns `DbError::Corruption` if the file cannot be read, is unexpectedly truncated,
+    /// or if a record cannot be successfully deserialized.
     pub async fn read_all_records(path: &Path) -> Result<Vec<LogRecord>, DbError> {
         let mut file = File::open(path)
             .await
@@ -98,9 +124,16 @@ impl WalWriter {
     }
 
     /// Appends a new `LogRecord` to the WAL in memory buffer.
+    ///
+    /// # Errors
+    /// Returns `DbError::Serialize` if the record cannot be serialized.
+    /// Returns `DbError::IO` if writing to the buffer fails.
     pub async fn append(&mut self, record: &LogRecord) -> Result<(), DbError> {
+        // Serialize the record into binary format
         let encode: Vec<u8> = bincode::serialize(record)?;
         let len = encode.len() as u32;
+        
+        // Write a 4-byte length prefix followed by the payload
         self.writer.write_all(&len.to_le_bytes()).await?;
         self.writer.write_all(&encode).await?;
 
@@ -108,6 +141,9 @@ impl WalWriter {
     }
 
     /// Flushes the internal buffer and forces an fsync to ensure durability.
+    ///
+    /// # Errors
+    /// Returns `DbError::IO` if either the `flush()` or `sync_data()` system calls fail.
     pub async fn sync(&mut self) -> Result<(), DbError> {
         // 必须先调用 flush()，将 BufWriter 在内存里缓冲的字节推入操作系统的内核态
         self.writer.flush().await?;

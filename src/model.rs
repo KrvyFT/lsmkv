@@ -1,6 +1,13 @@
+//! Core data structures and type definitions.
+//!
+//! This module defines the common vocabulary used throughout the LSM-Tree,
+//! including representations for Keys, Values, and the result types of database queries.
+
 use serde::{Deserialize, Serialize};
 
+/// Type alias for keys, which are arbitrary byte arrays.
 pub type Key = Vec<u8>;
+/// Type alias for values, which are arbitrary byte arrays.
 pub type Value = Vec<u8>;
 
 /// Represents the type of a WAL log record or an SSTable entry.
@@ -34,5 +41,6 @@ pub enum GetResult<T> {
     /// Key was not found in the current component.
     NotFound,
 
+    /// An error occurred during retrieval (e.g. underlying file corruption or decompression failure).
     Error(String),
 }

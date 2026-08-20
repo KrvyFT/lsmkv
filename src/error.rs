@@ -1,3 +1,9 @@
+//! Global error definitions for the LSM-Tree database.
+//!
+//! We follow a Fail-Fast philosophy: standard CRUD operations return `DbError::NotFound`
+//! for missing data, but critical storage anomalies (like I/O failures on WAL or corrupted magic numbers)
+//! yield `DbError::Corruption`, triggering panics or graceful shutdowns to protect data integrity.
+
 use thiserror::Error;
 
 /// Global error type for the LSM-Tree database.

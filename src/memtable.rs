@@ -1,3 +1,13 @@
+//! In-memory key-value store buffering layer.
+//!
+//! The MemTable acts as the first tier of the LSM-Tree, absorbing all incoming writes
+//! and providing fast reads for recently written data.
+//!
+//! # Implementation Note
+//! While many LSM engines (like LevelDB) use a SkipList, we utilize Rust's standard `BTreeMap`.
+//! `BTreeMap` provides excellent cache locality (B-Tree structure) and is generally faster 
+//! than a naive SkipList implementation in safe Rust due to reduced pointer chasing.
+
 use std::collections::BTreeMap;
 
 use crate::{
@@ -29,7 +39,10 @@ impl MemTable {
     /// A `None` value represents a Tombstone (deletion).
     pub fn put(&mut self, key: Key, value: Option<Value>) {
         let key_len = key.len();
+        // Optimistically add the size of the new key and value
         self.approx_size += key_len + value.as_ref().map_or(0, |v| v.len());
+        
+        // If the key already existed, subtract the size of the old value to keep the approximation accurate
         if let Some(old_value) = self.map.insert(key, value) {
             self.approx_size -= key_len + old_value.map_or(0, |v| v.len());
         }
@@ -46,6 +59,7 @@ impl MemTable {
 
     /// Inserts a Tombstone for the given key, effectively deleting it.
     pub fn delete(&mut self, key: &Key) -> Result<(), DbError> {
+        // A tombstone uses memory for the key, but 0 for the value
         self.approx_size += key.len();
         if let Some(old_opt) = self.map.insert(key.clone(), None) {
             self.approx_size -= key.len() + old_opt.map_or(0, |v| v.len());

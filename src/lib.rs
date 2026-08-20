@@ -1,3 +1,12 @@
+//! `lsmkv` is an async, high-performance Key-Value store based on the Log-Structured Merge-Tree (LSM-Tree) architecture.
+//! 
+//! # Architecture Overview
+//! - **WAL (Write-Ahead Log)**: Guarantees data durability (Fail-Fast). All writes are appended here first.
+//! - **MemTable**: In-memory BTreeMap. Absorbs recent writes and serves hot reads.
+//! - **SSTable**: Immutable, on-disk sorted string tables. Supports zero-copy reads via `mmap`.
+//! - **Group Commit**: Asynchronous writes are batched into a single WAL append for massive throughput.
+//! - **Compaction (WIP)**: Background tasks that merge SSTables to reclaim space and maintain read performance.
+
 pub mod error;
 pub mod flush;
 pub mod memtable;
@@ -71,7 +80,15 @@ pub struct LsmKv {
 }
 
 impl LsmKv {
-    /// Opens or creates a new `LsmKv` instance, recovering from the WAL log if it exists.
+    /// Opens or creates a new `LsmKv` instance using the provided configuration.
+    ///
+    /// If the directory specified in `options.dir` does not exist, it will be created.
+    /// If WAL logs are present in the directory, this method will perform crash recovery
+    /// by replaying all write operations into the MemTable before accepting new requests.
+    ///
+    /// # Errors
+    /// Returns `DbError::Corruption` if the directory cannot be created, or if any existing
+    /// WAL files are corrupted and cannot be successfully parsed.
     pub async fn open(options: DbOptions) -> Result<Self> {
         let options = Arc::new(options);
         let dir_path = &options.dir;
@@ -173,7 +190,14 @@ impl LsmKv {
     }
 
     /// Retrieves a value by its key.
-    /// This method leverages a shared read lock for fast concurrent queries without blocking async writes.
+    ///
+    /// This is a synchronous operation. It searches the active MemTable, then immutable MemTables,
+    /// and finally the on-disk SSTables in reverse chronological order to ensure the freshest value
+    /// is returned. It uses granular read locks to allow high concurrent read throughput.
+    ///
+    /// # Errors
+    /// Returns `DbError::NotFound` if the key does not exist or if it was marked as deleted (Tombstone).
+    /// Returns `DbError::Corruption` if an underlying I/O or deserialization error occurs while reading SSTables.
     pub fn get(&self, k: &Key) -> Result<Value> {
         let core = self.core.read().unwrap();
 
@@ -208,8 +232,14 @@ impl LsmKv {
         Err(DbError::NotFound)
     }
 
-    /// Asynchronously puts a key-value pair into the database.
-    /// Uses Group Commit under the hood to ensure extreme write performance.
+    /// Asynchronously writes a key-value pair into the database.
+    ///
+    /// This operation is safely batched using Group Commit. The future will only resolve
+    /// after the data has been durably appended and `fsync`ed to the Write-Ahead Log (WAL).
+    /// 
+    /// # Errors
+    /// Returns `DbError::Corruption` if the background writer task has panicked (e.g., due to disk full)
+    /// or if the communication channel is closed.
     pub async fn put(&self, key: Key, value: Value) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let msg = WriteMessage {
@@ -224,6 +254,12 @@ impl LsmKv {
     }
 
     /// Asynchronously deletes a key-value pair from the database.
+    ///
+    /// This inserts a Tombstone marker for the key, logically deleting it. The actual
+    /// storage space will be reclaimed during future background Compaction processes.
+    ///
+    /// # Errors
+    /// Returns `DbError::Corruption` if the background writer task has panicked or the channel is dropped.
     pub async fn delete(&self, key: Key) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let msg = WriteMessage {

@@ -1,3 +1,10 @@
+//! Background compaction and flushing subsystem.
+//! 
+//! When a MemTable reaches its capacity, it becomes immutable and a new MemTable is created.
+//! This module provides the `Flusher` orchestrator which takes these Immutable MemTables
+//! and writes them out to disk as SSTables (Sorted String Tables) in a background thread pool,
+//! without blocking the main async read/write paths.
+
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -45,6 +52,10 @@ impl Flusher {
 
     /// Spawns the main dispatch loop in an async tokio task.
     /// Listens for `FlushTask`s and delegates them to the blocking thread pool.
+    ///
+    /// This method ensures that CPU-intensive background tasks like sorting,
+    /// block compression (e.g. Zstd), and disk I/O do not block the primary
+    /// async runtime scheduler.
     pub fn spawn(mut self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(task_item) = self.task_rx.recv().await {
